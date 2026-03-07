@@ -1,0 +1,61 @@
+[project]
+name = "repo-chat"
+version = "0.1.0"
+description = "Chat with your codebase locally"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["code", "chat", "llm", "local", "codebase"]
+
+authors = [
+    {name = "Your Name", email = "you@example.com"}
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "sentence-transformers>=2.2.0",
+    "numpy>=1.24.0",
+    "einops>=0.7.0",
+    "llama-cpp-python>=0.2.0",
+    "huggingface-hub>=0.19.0",
+    "click>=8.1.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+repochat = "repochat.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/repo-chat"
+Repository = "https://github.com/yourusername/repo-chat"
+Issues = "https://github.com/yourusername/repo-chat/issues"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["repochat*"]
+
+[tool.setuptools.package-data]
+repochat = ["frontend/*"]
