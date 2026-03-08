@@ -1,114 +1,117 @@
-"""
-Code indexer for repo-chat.
-
-Uses lightweight chunker to split files into semantic chunks.
-"""
+"""Index a Python repository by walking files and orchestrating parsing/chunking."""
 
 from pathlib import Path
-from typing import List, Set
-from repochat.chunker import chunk_file, CodeChunk
-from repochat.storage import Storage
+from typing import List
 
-
-# ------------------------
-# CONFIGURATION
-# ------------------------
-
-MAX_FILE_SIZE = 1024 * 1024  # 1MB
-IGNORE_DIRS = {'.git', '__pycache__', '.venv', 'venv', 'node_modules', '.repochat'}
+from .chunker import Chunker
+from .parser import Parser
+from .models import Node, Edge, Chunk
 
 
 class Indexer:
-    """Index code repository by splitting files into chunks."""
+    """Orchestrate repository indexing by walking files and running parsers."""
 
     def __init__(self, repo_root: str):
         """Initialize the indexer.
 
         Args:
-            repo_root: Root directory of the repository.
+            repo_root: Path to the repository root.
         """
-        self.repo_root = Path(repo_root)
-        self.storage = Storage(repo_root)
+        self.repo_root = Path(repo_root).resolve()
+        self.parser = Parser()
+        self.chunker = Chunker()
 
-    def index_repository(self) -> int:
-        """Index all files in the repository.
+    def index_repo(self) -> dict:
+        """Index all Python files in the repository.
 
         Returns:
-            Number of files indexed.
+            Summary dict with counts of indexed items.
         """
+        all_nodes: List[Node] = []
+        all_edges: List[Edge] = []
+        all_chunks: List[Chunk] = []
         files_indexed = 0
 
-        for file_path in self._scan_files():
+        # Find all Python files
+        python_files = list(self.repo_root.rglob("*.py"))
+
+        # Filter out specific directories
+        # Don't use .startswith(".") filter as it's too aggressive for subdirs
+        IGNORE_DIRS = {
+            "__pycache__", "venv", ".venv", "site-packages",
+            ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+            ".repochat", "node_modules", ".idea", ".vscode"
+        }
+
+        python_files = [
+            f for f in python_files
+            if not any(part in IGNORE_DIRS for part in f.parts)
+        ]
+
+        for file_path in python_files:
             try:
-                text = file_path.read_text(encoding="utf-8", errors="ignore")
-                chunks = chunk_file(text, str(file_path))
+                # Read file content once
+                content = file_path.read_text(encoding="utf-8")
 
-                if chunks:
-                    # Convert CodeChunk dataclass to storage format
-                    from repochat.models import CodeChunk as StorageChunk
-                    storage_chunks = [
-                        StorageChunk(
-                            id=None,
-                            file_path=chunk.file_path,
-                            line_start=chunk.line_start,
-                            line_end=chunk.line_end,
-                            content=chunk.content,
-                            embedding=None,
-                            is_doc=(chunk.kind == "document"),
-                            symbol_name=chunk.symbol,
-                            kind=chunk.kind
-                        )
-                        for chunk in chunks
-                    ]
-                    self.storage.add_chunks(storage_chunks)
-                    files_indexed += 1
-            except Exception:
-                # Skip files that cause errors during parsing
+                # Use relative path for storage (portable)
+                rel_path = str(file_path.relative_to(self.repo_root))
+
+                # Parse structure (pass content to avoid re-reading)
+                nodes, edges = self.parser.parse_file(rel_path, content)
+
+                # Create chunks
+                chunks = self.chunker.chunk_file(rel_path, content, nodes)
+
+                all_nodes.extend(nodes)
+                all_edges.extend(edges)
+                all_chunks.extend(chunks)
+                files_indexed += 1
+
+            except Exception as e:
+                # Log error but continue processing other files
+                print(f"Error indexing {file_path}: {e}")
                 continue
 
-        return files_indexed
+        return {
+            "files_indexed": files_indexed,
+            "nodes": all_nodes,
+            "edges": all_edges,
+            "chunks": all_chunks,
+        }
 
-    def _scan_files(self) -> List[Path]:
-        """Scan repository for files to index.
-
-        Returns:
-            List of file paths to index.
-        """
-        files = []
-
-        for file_path in self.repo_root.rglob("*"):
-            # Skip ignored directories
-            if any(ignored in file_path.parts for ignored in IGNORE_DIRS):
-                continue
-
-            # Skip directories and non-files
-            if not file_path.is_file():
-                continue
-
-            # Skip files that are too large
-            if file_path.stat().st_size > MAX_FILE_SIZE:
-                continue
-
-            # Skip binary files (simple heuristic)
-            if not self._is_text_file(file_path):
-                continue
-
-            files.append(file_path)
-
-        return files
-
-    def _is_text_file(self, file_path: Path) -> bool:
-        """Check if a file is text-based.
+    def index_file(self, file_path: str) -> dict:
+        """Index a single file.
 
         Args:
-            file_path: Path to check.
+            file_path: Path to the file to index.
 
         Returns:
-            True if text file, False otherwise.
+            Dict with nodes, edges, and chunks from the file.
         """
-        # Try to read first 8KB and check for null bytes
+        path = Path(file_path).resolve()
+
+        if not path.exists():
+            return {"nodes": [], "edges": [], "chunks": []}
+
         try:
-            content = file_path.read_bytes()[:8192]
-            return b'\x00' not in content
-        except Exception:
-            return False
+            # Read file content once
+            content = path.read_text(encoding="utf-8")
+
+            # Use relative path for storage (portable)
+            rel_path = str(path.relative_to(self.repo_root))
+
+            # Parse structure (pass content to avoid re-reading)
+            nodes, edges = self.parser.parse_file(rel_path, content)
+
+            # Create chunks
+            chunks = self.chunker.chunk_file(rel_path, content, nodes)
+
+            return {
+                "nodes": nodes,
+                "edges": edges,
+                "chunks": chunks,
+            }
+
+        except Exception as e:
+            print(f"Error indexing {file_path}: {e}")
+            return {"nodes": [], "edges": [], "chunks": []}

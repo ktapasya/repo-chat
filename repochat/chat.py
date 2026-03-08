@@ -1,256 +1,181 @@
-"""LLM integration and chat logic for repo-chat."""
+"""Chat interface for repo-chat."""
 
-import os
-from pathlib import Path
-from typing import Optional
+from typing import List, Any
 
-from .search import Retriever
-from .storage import Storage
+from .search import Search
+from .models import SearchResult
 
 
 class Chat:
-    """Handles chat interactions with the codebase using a local LLM."""
+    """Handle question answering over the codebase."""
 
-    # Recommended models for local inference
-    DEFAULT_MODEL = "LiquidAI/LFM2.5-1.2B-Instruct-GGUF"
-    ALTERNATIVE_MODEL = "unsloth/Qwen3.5-2B-GGUF"
-
-    SYSTEM_PROMPT = (
-        "You answer questions about a codebase.\n"
-        "Rules:\n"
-        "- Use ONLY the provided code context.\n"
-        "- If the answer appears in the code, return the exact value.\n"
-        "- Do NOT explain reasoning.\n"
-        "- Do NOT say \"to determine\".\n"
-        "- If the answer is not visible in the code context, say: I cannot find this in the indexed code.\n"
-    )
-
-    def __init__(self, repo_root: Path):
+    def __init__(self, repo_root: str, llm: Any):
         """Initialize the chat interface.
 
         Args:
             repo_root: Path to the repository root.
+            llm: LLM instance with a generate(prompt) method.
         """
-        self.repo_root = repo_root
-        self.storage = Storage(repo_root)
-        self.retriever = Retriever(repo_root)
-        self._llm = None
+        self.search = Search(repo_root)
+        self.llm = llm
 
     def ask(self, question: str, top_k: int = 6) -> dict:
-        """Ask a question about the codebase.
+        """Answer a question about the repository.
 
         Args:
-            question: User's question.
-            top_k: Number of code chunks to retrieve for context.
+            question: User's question about the codebase.
+            top_k: Number of relevant chunks to retrieve.
 
         Returns:
-            Dictionary with 'answer' and 'sources' keys.
+            Dict with 'answer' (str) and 'sources' (List[str]).
         """
-        # Retrieve relevant context (limit to 3 chunks to avoid overflow)
-        context = self.retriever.get_context(question, 4)
+        # Retrieve relevant code chunks
+        results = self.search.search(question, top_k)
 
-        # Get sources (file references)
-        sources = self._extract_sources(question, 4)
+        # Build context from retrieved chunks
+        context = self._build_context(results)
 
-        # Generate answer
-        answer = self._generate_answer(question, context)
+        print("----- CONTEXT -----")
+        print(context)
+        print("-------------------")
+
+        # Build prompt with context and question
+        prompt = self._build_prompt(question, context)
+
+        # Generate answer using LLM
+        answer = self.llm.generate(prompt)
+
+        # Format source references
+        sources = [
+            f"{r.chunk.file_path}:{r.chunk.start_line}-{r.chunk.end_line}"
+            for r in results
+        ]
 
         return {
             "answer": answer,
-            "sources": sources
+            "sources": sources,
         }
 
-    def _extract_sources(self, question: str, top_k: int) -> list:
-        """Extract file references from retrieved chunks.
+    def _build_context(self, results: List[SearchResult]) -> str:
+        """Build context string from search results.
 
         Args:
-            question: User's question.
-            top_k: Number of chunks to retrieve.
+            results: List of search results with chunks and scores.
 
         Returns:
-            List of file reference strings like "auth.py:42-70".
+            Formatted context string with code chunks.
         """
-        chunks = self.retriever.retrieve(question, top_k)
-        print("Inside chat.py")
-        for c in chunks:
-            print("----")
-            print(c.file_path, c.line_start, c.line_end)
-            print(c.content[:400])
+        # Step 1: Merge adjacent/overlapping chunks from same file
+        merged_chunks = self._merge_nearby_chunks(results)
 
-        sources = []
-        seen = set()  # Deduplicate
+        # Step 2: Format merged chunks
+        parts = []
+        for chunk in merged_chunks:
+            parts.append(f"{'#'*40}\n### {chunk['file_path']}\n{'#'*40}\n{chunk['content']}")
 
-        for chunk in chunks:
-            ref = f"{chunk.file_path}:{chunk.line_start}-{chunk.line_end}"
-            if ref not in seen:
-                sources.append(ref)
-                seen.add(ref)
+        return "\n\n".join(parts)
 
-        return sources
-
-    def _generate_answer(self, question: str, context: str) -> str:
-        """Generate an answer using the LLM.
+    def _merge_nearby_chunks(self, results: List[SearchResult]) -> List[dict]:
+        """Merge chunks by file: split by lines, dedupe by line number, sort, join.
 
         Args:
-            question: User's question.
-            context: Retrieved code context.
+            results: List of search results.
 
         Returns:
-            Generated answer.
+            List of merged chunk dicts with keys: file_path, content.
         """
-        try:
-            # Try using llama-cpp-python for GGUF models
-            return self._generate_with_llama_cpp(question, context)
-        except Exception as e:
-            # Log the error for debugging
-            import sys
-            print(f"LLM generation error: {type(e).__name__}: {e}", file=sys.stderr)
+        if not results:
+            return []
 
-            # Fallback to a simple rule-based response
-            return self._generate_fallback(question, context)
+        from collections import defaultdict
 
-    def _generate_with_llama_cpp(self, question: str, context: str) -> str:
-        """Generate answer using llama-cpp-python.
+        # Group chunks by file
+        chunks_by_file = defaultdict(list)
+        for result in results:
+            chunks_by_file[result.chunk.file_path].append(result.chunk)
 
-        Args:
-            question: User's question.
-            context: Retrieved code context.
+        merged = []
 
-        Returns:
-            Generated answer.
-        """
-        try:
-            from llama_cpp import Llama
-        except ImportError:
-            raise RuntimeError(
-                "llama-cpp-python is required for LLM inference. "
-                "Install with: pip install llama-cpp-python"
-            )
+        # Process each file's chunks
+        for file_path, chunks in chunks_by_file.items():
+            # Split all chunks into (line_number, line_content) pairs
+            all_lines = []
+            for chunk in chunks:
+                lines = chunk.content.split('\n')
+                for i, line in enumerate(lines, start=chunk.start_line):
+                    all_lines.append((i, line))
 
-        # Lazy load the model
-        # if self._llm is None:
-        self._llm = self._load_llm()
+            # Sort by line number
+            all_lines.sort(key=lambda x: x[0])
 
-        # Assemble prompt
-        prompt = self._assemble_prompt(question, context)
+            # Dedupe by line number (keep first occurrence)
+            seen = set()
+            unique_lines = []
+            for line_num, line in all_lines:
+                if line_num not in seen:
+                    seen.add(line_num)
+                    unique_lines.append((line_num, line))
 
-        print("PROMPT TOKENS:", len(prompt.split()))
+            # Build content with ... for gaps
+            content_parts = []
+            for i, (line_num, line) in enumerate(unique_lines):
+                # Add ellipsis if there's a gap from previous line
+                if i > 0 and line_num > unique_lines[i-1][0] + 1:
+                    content_parts.append("...")
+                # Add line number
+                content_parts.append(f"{line_num}: {line}")
 
-        # Generate response
-        try:
-            response = self._llm(
-                prompt,
-                max_tokens=512,
-                stop=["<|im_end|>", "<|endoftext|>", "\n\n\n"],
-                echo=False
-            )
+            merged.append({
+                'file_path': file_path,
+                'content': '\n'.join(content_parts)
+            })
 
-            # Handle different response formats from llama-cpp-python
-            if isinstance(response, str):
-                answer = response.strip()
-            elif isinstance(response, dict):
-                if "choices" in response:
-                    answer = response["choices"][0]["text"].strip()
-                else:
-                    answer = str(response).strip()
-            else:
-                answer = str(response).strip()
+        return merged
 
-            return answer
-        except Exception as e:
-            # If LLM generation fails, raise to trigger fallback
-            raise RuntimeError(f"LLM generation failed: {e}") from e
-
-    def _load_llm(self):
-        """Load the LLM model with auto-download.
-
-        Returns:
-            Loaded llama-cpp-python Llama instance.
-        """
-        model_name = self.DEFAULT_MODEL
-        cache_dir = os.path.expanduser("~/.cache/repochat/models")
-        Path(cache_dir).mkdir(parents=True, exist_ok=True)
-
-        # Use the model name directly as the repo ID (keep -GGUF suffix)
-        hf_repo_id = model_name
-
-        try:
-            from huggingface_hub import hf_hub_download
-
-            # Download GGUF model - determine filename based on model
-            # Most GGUF models use standardized naming
-            if "LFM" in hf_repo_id:
-                filename = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf"
-            elif "Qwen3.5" in hf_repo_id:
-                filename = hf_repo_id.split("/")[-1].replace("-GGUF", "-Q4_K_M.gguf").lower()
-            else:
-                filename = hf_repo_id.split("/")[-1].replace("-GGUF", "-q4_k_m.gguf").lower()
-
-            # Download GGUF model
-            model_path = hf_hub_download(
-                repo_id=hf_repo_id,
-                filename=filename,
-                cache_dir=cache_dir,
-                resume_download=True
-            )
-
-            from llama_cpp import Llama
-            llm = Llama(
-                model_path=model_path,
-                n_ctx=8192,  # Increased from 4096
-                n_threads=4,
-                verbose=False,
-                temperature=0.0  # Deterministic output
-            )
-
-            return llm
-
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load LLM model: {e}. "
-                "The model will be downloaded automatically on first run."
-            ) from e
-
-    def _assemble_prompt(self, question: str, context: str) -> str:
-        """Assemble the prompt for the LLM.
-
-        Uses plain text format.
+    def _build_prompt(self, question: str, context: str) -> str:
+        """Build prompt for the LLM.
 
         Args:
             question: User's question.
             context: Retrieved code context.
 
         Returns:
-            Formatted prompt string.
+            Complete prompt string.
         """
-        # Plain text format (not ChatML)
-        prompt = (
-            f"{self.SYSTEM_PROMPT}\n\n"
-            "Code context:\n"
-        )
+        return f"""You answer questions about a codebase.
 
-        if context:
-            prompt += f"{context}\n\n"
-            prompt += f"Question:\n{question}\n\n"
-        else:
-            prompt += f"Question:\n{question}\n\n"
+You can take help from the provided code context. Understand it because the answer usually lives in it.
 
-        prompt += "Answer:\n"
+If the answer is a specific value, return ONLY the value.
 
-        return prompt
+If the question asks how something works, explain the steps in the code.
 
-    def _generate_fallback(self, question: str, context: str) -> str:
-        """Generate a simple answer when LLM is not available.
+If the answer is not present, say:
+I cannot find this in the indexed code.
 
-        Args:
-            question: User's question.
-            context: Retrieved code context.
+If a statement comes from the context, cite the corresponding number
+Example:
 
-        Returns:
-            Simple rule-based answer.
-        """
-        if not context:
-            return "I couldn't find relevant code for your question. The repository may not be indexed yet."
+Question: What database is used?
 
-        # Simple extraction: return context directly
-        return f"Based on the codebase, here's what I found:\n\n{context[:500]}..."
+Answer:
+The system uses the postgres database [1].
+
+Context:
+[1] config.py:10-12
+DB_ENGINE = “postgres”
+
+Now answer the real question.
+
+Code context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+
+    def close(self):
+        """Close the search connection."""
+        self.search.close()

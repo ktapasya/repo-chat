@@ -7,7 +7,6 @@ import click
 
 from .indexer import Indexer
 from .embed import Embedder
-from .symbols import SymbolExtractor
 from .storage import Storage
 from .server import run_server
 
@@ -43,18 +42,18 @@ def main(reindex: bool, port: int):
 
         # Clear existing index for reindex
         if reindex:
-            storage.clear_index()
+            storage.clear()
             print("✓ Cleared existing index")
 
         # Step 1: Index files
         indexer = Indexer(repo_root)
-        files_indexed = indexer.index_repository()
-        print(f"✓ Indexed {files_indexed} files")
+        result = indexer.index_repo()
 
-        # Step 2: Extract symbols
-        symbol_extractor = SymbolExtractor(repo_root)
-        symbols_count = symbol_extractor.index_repository_symbols()
-        print(f"✓ Extracted {symbols_count} symbols")
+        # Store parsed data
+        storage.insert_nodes(result["nodes"])
+        storage.insert_edges(result["edges"])
+        storage.insert_chunks(result["chunks"])
+        print(f"✓ Indexed {result['files_indexed']} files")
 
         # Step 3: Generate embeddings
         embedder = Embedder()

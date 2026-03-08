@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
 from .chat import Chat
+from .llm import LocalLLM
 
 
 class ChatRequest(BaseModel):
@@ -23,11 +24,12 @@ class ChatResponse(BaseModel):
     sources: list[str]
 
 
-def create_app(repo_root: Optional[str] = None) -> FastAPI:
+def create_app(repo_root: Optional[str] = None, llm_model: Optional[str] = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
     Args:
         repo_root: Path to the repository root. Defaults to current directory.
+        llm_model: Optional model name for local LLM. If None, uses LocalLLM default.
 
     Returns:
         Configured FastAPI application.
@@ -41,8 +43,14 @@ def create_app(repo_root: Optional[str] = None) -> FastAPI:
     # Frontend directory
     frontend_dir = Path(__file__).parent.parent / "frontend"
 
+    # Initialize LLM
+    if llm_model is None:
+        llm = LocalLLM()
+    else:
+        llm = LocalLLM(model_name=llm_model)
+
     # Initialize chat interface
-    chat = Chat(repo_root)
+    chat = Chat(repo_root, llm)
 
     @app.get("/", response_class=HTMLResponse)
     async def root():

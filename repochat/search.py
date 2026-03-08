@@ -1,257 +1,250 @@
-"""Vector search and retrieval for repo-chat."""
+"""Vector search for repo-chat."""
 
-import re
-from typing import List, Optional, Tuple
-
+from typing import List
 import numpy as np
 
-from .embed import Embedder
-from .models import CodeChunk, Symbol
 from .storage import Storage
+from .embed import Embedder
+from .models import Chunk, SearchResult
 
 
-def _normalize_identifiers(text: str) -> str:
-    """Normalize code identifiers for better embedding similarity.
-
-    Transforms code-specific patterns into natural language:
-    - DEFAULT_MODEL -> "default model"
-    - LiquidAI/LFM2.5 -> "liquidai lfm 2 5"
-    - _private_func -> "private func"
-
-    Args:
-        text: Raw code text.
-
-    Returns:
-        Normalized text with identifiers split into natural tokens.
-    """
-    # Replace underscores and slashes with spaces
-    text = text.replace("_", " ")
-    text = text.replace("/", " ")
-    # Split camelCase and PascalCase
-    # Insert space before uppercase letters that follow lowercase
-    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-    # Split numbers from letters
-    text = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', text)
-    text = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', text)
-    # Remove special characters except alphanumeric and spaces
-    text = re.sub(r'[^\w\s]', ' ', text)
-    # Normalize whitespace and lowercase
-    text = ' '.join(text.split())
-    return text.lower()
-
-
-class Retriever:
-    """Retrieves relevant code chunks using vector search and symbol lookup."""
+class Search:
+    """Retrieve relevant chunks using vector similarity."""
 
     def __init__(self, repo_root: str):
-        """Initialize the retriever.
+        """Initialize the search engine.
 
         Args:
             repo_root: Path to the repository root.
         """
-        self.repo_root = repo_root
         self.storage = Storage(repo_root)
         self.embedder = Embedder()
 
-    def retrieve(self, query: str, top_k: int = 6) -> List[CodeChunk]:
-        """Retrieve relevant code chunks for a query.
+    def search(self, query: str, top_k: int = 6) -> List[SearchResult]:
+        """Return top-k relevant chunks for a query.
 
         Args:
-            query: User's question.
-            top_k: Number of chunks to retrieve.
+            query: Search query text.
+            top_k: Number of results to return.
 
         Returns:
-            List of relevant CodeChunks sorted by relevance.
+            List of SearchResult objects, sorted by relevance (highest first).
         """
-        # First check if query references a specific symbol
-        symbol = self._extract_symbol(query)
-        if symbol:
-            symbol_data = self.storage.get_symbol(symbol)
-            if symbol_data:
-                # Fetch the specific code block for this symbol
-                return self._fetch_symbol_chunk(symbol_data)
+        # Step 1: Vector search
+        vector_results = self._vector_search(query, top_k)
 
-        # Fall back to vector search
-        return self._vector_search(query, top_k)
+        # Store query embedding for computing neighbor scores
+        query_embedding_bytes = self.embedder.embed(query)
+        self._query_embedding = Embedder.bytes_to_embedding(query_embedding_bytes)
 
-    def _extract_symbol(self, query: str) -> Optional[str]:
-        """Extract a potential symbol name from the query.
+        # Step 2: Expand graph from vector results (with neighbor tracking)
+        graph_chunks_with_source = self._expand_graph(vector_results)
 
-        Simple heuristic: look for identifiers like "login_user" or "AuthService"
+        # Step 3: Filter neighbors by score (keep top 5 per source chunk)
+        filtered_graph_chunks = self._filter_neighbors_by_score(graph_chunks_with_source, top_k_neighbors=5)
+
+        # Step 4: Merge and deduplicate
+        merged = self._merge_results(vector_results, filtered_graph_chunks)
+
+        # DEBUG: Print retrieval structure
+        self._print_debug_output(vector_results, graph_chunks_with_source)
+
+        # Step 5: Return merged results
+        return merged
+
+    def _format_neighbor(self, chunk: Chunk, source_chunk_id: int) -> str:
+        """Format neighbor chunk for debug output."""
+        return f"{chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
+
+    def _filter_neighbors_by_score(
+        self,
+        graph_chunks_with_source: List[tuple[Chunk, int]],
+        top_k_neighbors: int = 5
+    ) -> List[Chunk]:
+        """Filter neighbor chunks by semantic score, keeping top-K per source chunk.
 
         Args:
-            query: User's query.
+            graph_chunks_with_source: List of (neighbor_chunk, source_chunk_id) tuples.
+            top_k_neighbors: Number of top neighbors to keep per source chunk.
 
         Returns:
-            Symbol name if found, None otherwise.
+            List of filtered neighbor chunks.
         """
-        # Common patterns in questions
-        # "Where is X defined?" -> X is the symbol
-        # "How does X work?" -> X is the symbol
-        # "Show me X" -> X is the symbol
+        # Group neighbors by source chunk
+        neighbors_by_source = {}
+        for chunk, source_id in graph_chunks_with_source:
+            if source_id not in neighbors_by_source:
+                neighbors_by_source[source_id] = []
+            neighbors_by_source[source_id].append(chunk)
 
-        # Look for alphanumeric identifiers (CamelCase or snake_case)
-        import re
+        # For each source chunk, keep top-K neighbors by score
+        filtered_chunks = []
+        for source_id, neighbors in neighbors_by_source.items():
+            # Compute scores for all neighbors of this source
+            scored_neighbors = []
+            for nc in neighbors:
+                if nc.embedding:
+                    neighbor_emb = Embedder.bytes_to_embedding(nc.embedding)
+                    score = float(self._query_embedding @ neighbor_emb)
+                    scored_neighbors.append((nc, score))
 
-        # Pattern for function names (snake_case)
-        func_pattern = r'\b[a-z_][a-z0-9_]{2,}\b'
-        # Pattern for class names (CamelCase)
-        class_pattern = r'\b[A-Z][a-zA-Z0-9]{2,}\b'
+            # Sort by score and keep top-K
+            scored_neighbors.sort(key=lambda x: x[1], reverse=True)
+            top_chunks = [chunk for chunk, score in scored_neighbors[:top_k_neighbors]]
+            filtered_chunks.extend(top_chunks)
 
-        # Check for function names
-        func_matches = re.findall(func_pattern, query)
-        if func_matches:
-            # Check if any of these exist in the symbol table
-            for match in func_matches:
-                if self.storage.get_symbol(match):
-                    return match
+        return filtered_chunks
 
-        # Check for class names
-        class_matches = re.findall(class_pattern, query)
-        if class_matches:
-            for match in class_matches:
-                if self.storage.get_symbol(match):
-                    return match
-
-        return None
-
-    def _fetch_symbol_chunk(self, symbol: Symbol) -> List[CodeChunk]:
-        """Fetch code chunks for a specific symbol.
+    def _print_debug_output(
+        self,
+        vector_results: List[SearchResult],
+        graph_chunks_with_source: List[tuple[Chunk, int]]
+    ) -> None:
+        """Print debug output showing retrieval structure.
 
         Args:
-            symbol: Symbol to fetch code for.
-
-        Returns:
-            List of CodeChunks containing the symbol definition.
+            vector_results: Vector search results.
+            graph_chunks_with_source: Graph-expanded chunks with source tracking.
         """
-        # Find chunks that overlap with the symbol's line range
-        all_chunks = self.storage.get_all_chunks()
+        print("\n===== RETRIEVAL DEBUG =====")
+        for i, vr in enumerate(vector_results):
+            print(f"\n[{i}] {vr.chunk.file_path}:{vr.chunk.start_line}-{vr.chunk.end_line} (score={vr.score:.3f})")
 
-        matching_chunks = []
-        for chunk in all_chunks:
-            if chunk.file_path == symbol.file_path:
-                # Check if chunk overlaps with symbol range
-                if not (chunk.line_end < symbol.line_start or
-                        chunk.line_start > symbol.line_end):
-                    matching_chunks.append(chunk)
+            # Find nodes in this chunk
+            nodes = self.storage.get_nodes_in_chunk(
+                vr.chunk.file_path,
+                vr.chunk.start_line,
+                vr.chunk.end_line
+            )
 
-        return matching_chunks
+            # Find neighbors from this chunk's nodes with their scores
+            chunk_neighbors = []
+            for gc, source_chunk_id in graph_chunks_with_source:
+                if gc.id != vr.chunk.id and source_chunk_id == vr.chunk.id:
+                    # Compute real similarity score for neighbor
+                    if gc.embedding:
+                        neighbor_emb = Embedder.bytes_to_embedding(gc.embedding)
+                        score = float(self._query_embedding @ neighbor_emb)
+                    else:
+                        score = 0.0
+                    chunk_neighbors.append((gc, score))
 
-    def _token_overlap_score(self, query: str, content: str) -> float:
-        """Calculate token overlap score between query and content.
+            # Sort neighbors by score and print top 5
+            chunk_neighbors.sort(key=lambda x: x[1], reverse=True)
+            for neighbor, score in chunk_neighbors[:5]:
+                print(f"  - {self._format_neighbor(neighbor, vr.chunk.id)} (score={score:.3f})")
+
+            if not chunk_neighbors:
+                print(f"  (no neighbors - {len(nodes)} nodes in chunk)")
+        print("========================\n")
+
+    def _vector_search(self, query: str, top_k: int) -> List[SearchResult]:
+        """Perform pure vector similarity search.
 
         Args:
-            query: User's query.
-            content: Code chunk content.
+            query: Search query text.
+            top_k: Number of results to return.
 
         Returns:
-            Overlap score between 0 and 1.
+            List of SearchResult objects from vector search.
         """
-        # Simple tokenization: split on non-alphanumeric characters
-        import re
-        query_tokens = set(re.findall(r'\w+', query.lower()))
-        content_tokens = set(re.findall(r'\w+', content.lower()))
+        # Load chunks with embeddings
+        chunks = self.storage.get_chunks_with_embeddings()
 
-        if not query_tokens:
-            return 0.0
-
-        # Jaccard-like overlap: intersection / union
-        intersection = len(query_tokens & content_tokens)
-        union = len(query_tokens | content_tokens)
-
-        return intersection / union if union > 0 else 0.0
-
-    def _vector_search(self, query: str, top_k: int) -> List[CodeChunk]:
-        """Perform hybrid search using vector similarity and token overlap.
-
-        Args:
-            query: User's query.
-            top_k: Number of top results to return.
-
-        Returns:
-            List of CodeChunks sorted by relevance.
-        """
-        # Get all chunks with embeddings
-        all_chunks = self.storage.get_all_chunks()
-
-        # Filter out chunks without embeddings
-        chunks_with_embeddings = [
-            chunk for chunk in all_chunks
-            if chunk.embedding is not None
-        ]
-
-        if not chunks_with_embeddings:
+        if not chunks:
             return []
 
-        # Extract embeddings and chunk IDs
-        embeddings_list = [chunk.embedding for chunk in chunks_with_embeddings]
-
-        # Convert bytes to numpy array
-        embeddings_matrix = Embedder.bytes_to_embeddings_list(embeddings_list)
-
-        # Normalize query before embedding for better code identifier matching
-        normalized_query = _normalize_identifiers(query)
-        query_embedding = self.embedder.embed(normalized_query)
-        query_vector = Embedder.bytes_to_embedding(query_embedding)
-
-        # Compute cosine similarity
-        # Cosine similarity = dot product of normalized vectors
-        # Or equivalently: (A . B) / (||A|| * ||B||)
-
-        # Normalize vectors
-        norms = np.linalg.norm(embeddings_matrix, axis=1)
-        query_norm = np.linalg.norm(query_vector)
-
-        # Avoid division by zero
-        norms = np.where(norms == 0, 1, norms)
-        query_norm = query_norm if query_norm != 0 else 1
-
-        # Compute vector similarities
-        vector_similarities = np.dot(embeddings_matrix, query_vector) / (norms * query_norm)
-
-        # Compute token overlap scores for all chunks
-        token_scores = np.array([
-            self._token_overlap_score(query, chunk.content)
-            for chunk in chunks_with_embeddings
+        # Convert embeddings to numpy matrix
+        embeddings = Embedder.bytes_to_embeddings_list([
+            chunk.embedding for chunk in chunks
         ])
 
-        # Hybrid scoring: 70% vector + 30% lexical
-        # Weights can be tuned
-        hybrid_scores = 0.7 * vector_similarities + 0.3 * token_scores
+        # Embed query (convert bytes to numpy for similarity)
+        query_bytes = self.embedder.embed(query)
+        query_vec = Embedder.bytes_to_embedding(query_bytes)
 
-        # Get top-k indices by hybrid score
-        top_k_indices = np.argsort(hybrid_scores)[-top_k:][::-1]
-        results = [chunks_with_embeddings[idx] for idx in top_k_indices]
+        # Compute cosine similarity
+        # Note: embeddings are already normalized by embedder
+        scores = embeddings @ query_vec
+
+        # Get top-k indices (sorted by score, descending)
+        top_k = min(top_k, len(chunks))
+        top_indices = np.argsort(scores)[-top_k:][::-1]
+
+        # Build results
+        results = [
+            SearchResult(chunk=chunks[i], score=float(scores[i]))
+            for i in top_indices
+        ]
 
         return results
 
-    def get_context(self, query: str, top_k: int = 6) -> str:
-        """Assemble context from retrieved chunks.
+    def _expand_graph(self, results: List[SearchResult]) -> List[tuple[Chunk, int]]:
+        """Expand search results using graph traversal and track source chunks.
 
         Args:
-            query: User's query.
-            top_k: Number of chunks to retrieve.
+            results: Initial vector search results.
 
         Returns:
-            Formatted context string with code chunks and file references.
+            List of (neighbor_chunk, source_chunk_id) tuples.
         """
-        chunks = self.retrieve(query, top_k)
-        print("Inside search.py")
-        for c in chunks:
-            print("----")
-            print(c.file_path, c.line_start, c.line_end)
-            print(c.content[:400])
+        additional_chunks = []
+        visited_nodes = set()
 
-        if not chunks:
-            return ""
+        for result in results:
+            chunk = result.chunk
 
-        context_parts = []
+            # Find nodes in this chunk
+            nodes = self.storage.get_nodes_in_chunk(
+                chunk.file_path,
+                chunk.start_line,
+                chunk.end_line
+            )
 
-        for chunk in chunks:
-            # Format: File path and line range
-            ref = f"{chunk.file_path}:{chunk.line_start}-{chunk.line_end}"
-            context_parts.append(f"### {ref}\n")
-            context_parts.append(chunk.content)
-            context_parts.append("\n")
+            # Expand to ALL neighbors (no arbitrary limit)
+            for node in nodes:
+                if node.id in visited_nodes:
+                    continue
+                visited_nodes.add(node.id)
 
-        return "\n".join(context_parts)
+                neighbors = self.storage.get_neighbors(node.id)
+
+                # Get chunks for neighbor nodes
+                neighbor_chunks = self.storage.get_chunks_for_nodes(neighbors)
+                for nc in neighbor_chunks:
+                    additional_chunks.append((nc, chunk.id))
+
+        return additional_chunks
+
+    def _merge_results(
+        self,
+        vector_results: List[SearchResult],
+        graph_chunks: List[Chunk]
+    ) -> List[SearchResult]:
+        """Merge vector and graph results, deduplicating by chunk ID.
+
+        Args:
+            vector_results: Results from vector search.
+            graph_chunks: Additional chunks from graph expansion.
+
+        Returns:
+            Merged and deduplicated results.
+        """
+        # Start with vector results
+        seen_ids = {r.chunk.id for r in vector_results}
+        merged = list(vector_results)
+
+        # Add graph chunks (give small score boost)
+        for chunk in graph_chunks:
+            if chunk.id not in seen_ids:
+                merged.append(SearchResult(chunk=chunk, score=0.1))
+                seen_ids.add(chunk.id)
+
+        # Sort by score
+        merged.sort(key=lambda r: r.score, reverse=True)
+
+        return merged
+
+    def close(self):
+        """Close the storage connection."""
+        self.storage.close()

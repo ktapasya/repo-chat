@@ -56,7 +56,8 @@ function addMessage(role, content, sources = []) {
 
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
-    contentDiv.textContent = content;
+    // Parse markdown and set as HTML
+    contentDiv.innerHTML = marked.parse(content);
     messageDiv.appendChild(contentDiv);
 
     // Add sources if present
