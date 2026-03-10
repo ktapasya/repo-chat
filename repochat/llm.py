@@ -71,9 +71,6 @@ class LocalLLM:
         Returns:
             Loaded llama-cpp-python Llama instance.
         """
-        cache_dir = os.path.expanduser("~/.cache/repochat/models")
-        Path(cache_dir).mkdir(parents=True, exist_ok=True)
-
         # Use the model name directly as the repo ID
         hf_repo_id = self.model_name
 
@@ -93,7 +90,6 @@ class LocalLLM:
             model_path = hf_hub_download(
                 repo_id=hf_repo_id,
                 filename=filename,
-                cache_dir=cache_dir,
                 resume_download=True
             )
             print(f"Model loaded from {model_path}")

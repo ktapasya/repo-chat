@@ -1,19 +1,20 @@
-# repo-chat
+# Repo Chat
 
-Chat with your codebase locally. Zero cloud, minimal setup.
+**Chat with your codebase locally.** Zero cloud, minimal setup. Perfect for small codebases.
 
-## Features
+## Why repo-chat?
 
-- **Local-first**: Everything runs on your machine. No data leaves your computer.
-- **Zero configuration**: Just run `repochat` in any repository.
-- **Fast**: Indexes 5000 files in under 30 seconds.
-- **Code-aware**: Understands functions, classes, and code structure.
-- **Web interface**: Simple chat UI at http://localhost:7331
+- **100% Local**: Everything runs on your machine. No data leaves your computer. No API keys needed.
+- **Lightweight**: Minimal dependencies, fast indexing, small resource footprint (~2GB RAM).
+- **Code-aware**: Understands functions, classes, and how they connect through graph-augmented retrieval.
+- **Simple**: Just run `repochat` in any repository and start chatting.
 
 ## Installation
 
 ```bash
-pip install repo-chat
+git clone https://github.com/ktapasya/repo-chat.git
+cd repo-chat
+pip install -e .
 ```
 
 ## Usage
@@ -35,28 +36,27 @@ repochat --port 8080    # Use different port
 ## How it works
 
 1. **Scans** your repository (ignoring `.git`, `node_modules`, etc.)
-2. **Chunks** code by functions, classes, and text blocks
-3. **Embeds** chunks using a local model (nomic-embed-text-v1.5)
-4. **Searches** using vector similarity for your questions
-5. **Answers** using a local LLM (Qwen2.5)
+2. **Chunks** code by functions, classes, and blocks
+3. **Embeds** chunks using a local model (`bge-small-en-v1.5`)
+4. **Builds** a code graph (function calls, references, contains)
+5. **Searches** using vector similarity + graph expansion
+6. **Answers** using a local LLM (`LFM2.5-1.2B` Q4_K_M, ~1GB)
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - ~2GB RAM
-- First run downloads models (~500MB)
+- First run downloads models (~1.5GB total)
 
 ## Architecture
 
-Minimal dependencies:
+Minimal dependencies (~1900 lines):
 - `fastapi` - Web server
 - `uvicorn` - ASGI server
 - `sentence-transformers` - Embeddings
 - `numpy` - Vector operations
 - `llama-cpp-python` - LLM inference
 - `huggingface-hub` - Model downloads
-
-Total codebase: ~1000 lines
 
 ## License
 
