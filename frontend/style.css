@@ -91,6 +91,15 @@ h1 {
     color: #333;
 }
 
+/* Sources as a separate full-width message bubble */
+.message.sources {
+    display: block;
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 8px;
+    padding: 12px 16px;
+}
+
 /* Markdown styling */
 .message-content h1,
 .message-content h2,

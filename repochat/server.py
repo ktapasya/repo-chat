@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .chat import Chat
@@ -15,13 +15,6 @@ class ChatRequest(BaseModel):
     """Request model for chat endpoint."""
 
     question: str
-
-
-class ChatResponse(BaseModel):
-    """Response model for chat endpoint."""
-
-    answer: str
-    sources: list[str]
 
 
 def create_app(repo_root: Optional[str] = None, llm_model: Optional[str] = None) -> FastAPI:
@@ -77,29 +70,51 @@ def create_app(repo_root: Optional[str] = None, llm_model: Optional[str] = None)
             raise HTTPException(status_code=404, detail="JS not found")
         return FileResponse(js_file, media_type="application/javascript")
 
-    @app.post("/chat", response_model=ChatResponse)
-    async def chat_endpoint(request: ChatRequest):
-        """Process a chat question.
+    @app.post("/chat-stream")
+    async def chat_stream_endpoint(request: ChatRequest):
+        """Process a chat question with streaming response.
 
         Args:
             request: Chat request with question.
 
         Returns:
-            Chat response with answer and sources.
+            StreamingResponse with chunks of the answer.
 
         Raises:
             HTTPException: If processing fails.
         """
-        try:
-            response = chat.ask(request.question)
-            return ChatResponse(**response)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to process question: {str(e)}"
-            )
+        async def stream_generator():
+            try:
+                import asyncio
+                import json
+
+                for chunk in chat.ask_stream(request.question):
+                    if isinstance(chunk, dict):
+                        # Sources dict at the end
+                        yield f"data: [SOURCES] {json.dumps(chunk['sources'])}\n\n"
+                    else:
+                        # Text chunk - escape newlines to preserve them
+                        # SSE format requires each event to be on its own line
+                        # Literal newlines in chunks would break SSE parsing
+                        escaped_chunk = chunk.replace('\n', '\\n')
+                        yield f"data: {escaped_chunk}\n\n"
+                    await asyncio.sleep(0)
+
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                yield f"data: [ERROR] {str(e)}\n\n"
+
+        return StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
 
     @app.get("/health")
     async def health():

@@ -11,7 +11,7 @@
 ## Performance
 
 - [ ] Improve startup time
-- [ ] Improve inference speed
+- [x] Improve inference speed
 - [ ] Add support for local embeddings cache
 - [ ] Add progress bars during indexing
 - [ ] Add support for context window management
@@ -22,7 +22,7 @@
 
 ## UI/UX
 
-- [ ] Add streaming responses for LLM output
+- [x] Add streaming responses for LLM output
 - [ ] Add code syntax highlighting in markdown responses
 - [ ] Improve error handling and user feedback
 

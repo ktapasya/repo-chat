@@ -17,13 +17,20 @@ async function askQuestion() {
     sendButton.disabled = true;
 
     // Add user message to chat
-    addMessage('user', question);
+    const userMessageDiv = document.createElement('div');
+    userMessageDiv.className = 'message user';
+    const userContentDiv = document.createElement('div');
+    userContentDiv.className = 'message-content';
+    userContentDiv.textContent = question;
+    userMessageDiv.appendChild(userContentDiv);
+    chatHistory.appendChild(userMessageDiv);
 
     // Clear input
     questionInput.value = '';
 
     try {
-        const response = await fetch('/chat', {
+        // Use streaming endpoint
+        const response = await fetch('/chat-stream', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -35,55 +42,81 @@ async function askQuestion() {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
-        const data = await response.json();
+        // Create a placeholder message for streaming response
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message assistant';
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        messageDiv.appendChild(contentDiv);
+        chatHistory.appendChild(messageDiv);
 
-        // Add assistant response with sources
-        addMessage('assistant', data.answer, data.sources);
+        // Read the stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullAnswer = '';
+        let sources = [];
+
+        while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const data = line.slice(6);
+
+                    if (data === '[DONE]') {
+                        break;
+                    } else if (data.startsWith('[ERROR]')) {
+                        fullAnswer += `\n\nError: ${data.slice(7)}`;
+                    } else if (data.startsWith('[SOURCES]')) {
+                        sources = JSON.parse(data.slice(10));
+                    } else {
+                        // Unescape escaped newlines (server escapes them to preserve SSE format)
+                        const unescaped = data.replace(/\\n/g, '\n');
+                        fullAnswer += unescaped;
+                        contentDiv.innerHTML = marked.parse(fullAnswer);
+                        chatHistory.scrollTop = chatHistory.scrollHeight;
+                    }
+                }
+            }
+        }
+
+        // Add sources as a separate message bubble
+        if (sources.length > 0) {
+            const sourcesDiv = document.createElement('div');
+            sourcesDiv.className = 'message sources';
+
+            const sourcesLabel = document.createElement('div');
+            sourcesLabel.className = 'sources-label';
+            sourcesLabel.textContent = 'Sources:';
+            sourcesDiv.appendChild(sourcesLabel);
+
+            sources.forEach(source => {
+                const sourceLink = document.createElement('span');
+                sourceLink.className = 'source-link';
+                sourceLink.textContent = source;
+                sourcesDiv.appendChild(sourceLink);
+            });
+
+            chatHistory.appendChild(sourcesDiv);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+        }
+
     } catch (error) {
-        addMessage('assistant', `Error: ${error.message}`);
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'message assistant';
+        errorDiv.textContent = `Error: ${error.message}`;
+        chatHistory.appendChild(errorDiv);
     } finally {
         // Re-enable input
         questionInput.disabled = false;
         sendButton.disabled = false;
         questionInput.focus();
     }
-}
-
-// Add a message to the chat history
-function addMessage(role, content, sources = []) {
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${role}`;
-
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'message-content';
-    // Parse markdown and set as HTML
-    contentDiv.innerHTML = marked.parse(content);
-    messageDiv.appendChild(contentDiv);
-
-    // Add sources if present
-    if (sources && sources.length > 0) {
-        const sourcesDiv = document.createElement('div');
-        sourcesDiv.className = 'sources';
-
-        const sourcesLabel = document.createElement('div');
-        sourcesLabel.className = 'sources-label';
-        sourcesLabel.textContent = 'Sources:';
-        sourcesDiv.appendChild(sourcesLabel);
-
-        sources.forEach(source => {
-            const sourceLink = document.createElement('span');
-            sourceLink.className = 'source-link';
-            sourceLink.textContent = source;
-            sourcesDiv.appendChild(sourceLink);
-        });
-
-        messageDiv.appendChild(sourcesDiv);
-    }
-
-    chatHistory.appendChild(messageDiv);
-
-    // Scroll to bottom
-    chatHistory.scrollTop = chatHistory.scrollHeight;
 }
 
 // Event listeners

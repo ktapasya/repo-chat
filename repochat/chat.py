@@ -19,15 +19,16 @@ class Chat:
         self.search = Search(repo_root)
         self.llm = llm
 
-    def ask(self, question: str, top_k: int = 6) -> dict:
-        """Answer a question about the repository.
+    def ask_stream(self, question: str, top_k: int = 6):
+        """Answer a question about the repository with streaming.
 
         Args:
             question: User's question about the codebase.
             top_k: Number of relevant chunks to retrieve.
 
-        Returns:
-            Dict with 'answer' (str) and 'sources' (List[str]).
+        Yields:
+            Chunks of the answer as they are generated.
+            Finally yields a dict with 'sources' key.
         """
         # Retrieve relevant code chunks
         results = self.search.search(question, top_k)
@@ -35,26 +36,19 @@ class Chat:
         # Build context from retrieved chunks
         context = self._build_context(results)
 
-        print("----- CONTEXT -----")
-        print(context)
-        print("-------------------")
-
         # Build prompt with context and question
         prompt = self._build_prompt(question, context)
 
-        # Generate answer using LLM
-        answer = self.llm.generate(prompt)
+        # Stream answer from LLM
+        for chunk in self.llm.generate_stream(prompt):
+            yield chunk
 
-        # Format source references
+        # Yield sources at the end
         sources = [
             f"{r.chunk.file_path}:{r.chunk.start_line}-{r.chunk.end_line}"
             for r in results
         ]
-
-        return {
-            "answer": answer,
-            "sources": sources,
-        }
+        yield {"sources": sources}
 
     def _build_context(self, results: List[SearchResult]) -> str:
         """Build context string from search results.

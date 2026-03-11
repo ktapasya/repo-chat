@@ -48,22 +48,55 @@ class LocalLLM:
             self._llm = self._load_llm()
 
         try:
-            # Reset KV cache before generation
             self._llm.reset()
 
             response = self._llm(
                 prompt,
                 max_tokens=max_tokens,
-                stop=["</s>", "###"],  # More robust stop sequences
+                stop=["</s>", "###"],
                 echo=False,
                 temperature=self.temperature
             )
 
-            answer = response["choices"][0]["text"].strip()
-            return answer
+            return response["choices"][0]["text"].strip()
 
         except Exception as e:
             raise RuntimeError(f"LLM generation failed: {e}") from e
+
+    def generate_stream(self, prompt: str, max_tokens: int = 1024):
+        """Generate text from a prompt with streaming.
+
+        Args:
+            prompt: Input prompt text.
+            max_tokens: Maximum tokens to generate.
+
+        Yields:
+            Text chunks as they are generated.
+        """
+        # Lazy-load the model on first use
+        if self._llm is None:
+            self._llm = self._load_llm()
+
+        try:
+            self._llm.reset()
+
+            stream = self._llm.create_completion(
+                prompt,
+                max_tokens=max_tokens,
+                stop=["</s>", "###"],
+                echo=False,
+                temperature=self.temperature,
+                stream=True
+            )
+
+            for chunk in stream:
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    text = chunk["choices"][0].get("text", "")
+                    if text:
+                        yield text
+
+        except Exception as e:
+            raise RuntimeError(f"LLM streaming failed: {e}") from e
 
     def _load_llm(self):
         """Load the LLM model with auto-download.
@@ -95,10 +128,29 @@ class LocalLLM:
             print(f"Model loaded from {model_path}")
 
             from llama_cpp import Llama
+
+            # Detect GPU support
+            n_gpu_layers = 0
+            try:
+                # Try to offload 1 layer to test GPU support
+                test_llm = Llama(
+                    model_path=model_path,
+                    n_ctx=512,
+                    n_gpu_layers=1,
+                    verbose=False
+                )
+                n_gpu_layers = -1  # GPU works, offload all layers
+                print("🚀 GPU acceleration enabled")
+                del test_llm
+            except Exception:
+                n_gpu_layers = 0  # Use CPU
+                print("⚠️ GPU not available, using CPU for inference")
+
             llm = Llama(
                 model_path=model_path,
                 n_ctx=self.n_ctx,
                 n_threads=self.n_threads,
+                n_gpu_layers=n_gpu_layers,
                 verbose=False
             )
 
