@@ -33,36 +33,6 @@ class LocalLLM:
         self.temperature = temperature
         self._llm = None
 
-    def generate(self, prompt: str, max_tokens: int = 1024) -> str:
-        """Generate text from a prompt.
-
-        Args:
-            prompt: Input prompt text.
-            max_tokens: Maximum tokens to generate.
-
-        Returns:
-            Generated text response.
-        """
-        # Lazy-load the model on first use
-        if self._llm is None:
-            self._llm = self._load_llm()
-
-        try:
-            self._llm.reset()
-
-            response = self._llm(
-                prompt,
-                max_tokens=max_tokens,
-                stop=["</s>", "###"],
-                echo=False,
-                temperature=self.temperature
-            )
-
-            return response["choices"][0]["text"].strip()
-
-        except Exception as e:
-            raise RuntimeError(f"LLM generation failed: {e}") from e
-
     def generate_stream(self, prompt: str, max_tokens: int = 1024):
         """Generate text from a prompt with streaming.
 
@@ -166,23 +136,3 @@ class LocalLLM:
                 f"Failed to load LLM model: {e}. "
                 "The model will be downloaded automatically on first run."
             ) from e
-
-
-class MockLLM:
-    """Simple mock LLM for testing without a real model."""
-
-    def generate(self, prompt: str, max_tokens: int = 1024) -> str:
-        """Generate a mock response.
-
-        Args:
-            prompt: Input prompt (ignored).
-            max_tokens: Maximum tokens (ignored).
-
-        Returns:
-            Mock response text.
-        """
-        return (
-            "I'm a mock LLM. To use real LLM generation, install:\n"
-            "  pip install llama-cpp-python huggingface-hub\n"
-            "Then initialize Chat with: LocalLLM()"
-        )
