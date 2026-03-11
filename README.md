@@ -26,6 +26,10 @@ repochat
 
 Then open http://localhost:7331 in your browser.
 
+## Demo
+
+![Demo](demo.gif)
+
 ### Options
 
 ```bash
